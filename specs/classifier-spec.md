@@ -65,9 +65,9 @@ label was applied — title and description are both useful; other fields
 **Example block sketch (write one concrete example):**
 
 ```
-Title: {title}
-Description: {description}
-Label: {label}
+Title: Dr. Priya Nair on the Science of Sleep Deprivation
+Description: Dr. Priya Nair has spent fifteen years studying what happens to the brain when it doesn't sleep. In this episode, we talk through her landmark 2019 study on cumulative sleep debt, what the research says about weekend recovery sleep (spoiler: it doesn't work the way you think), and why she believes the eight-hour standard is more cultural myth than biological fact. She also shares what changed in her own sleep habits after spending a decade measuring everyone else's. If you've ever felt fine on five hours, this conversation will make you rethink that confidence.
+Label: interview
 ```
 
 ---
@@ -78,8 +78,8 @@ Label: {label}
 Present it in the same format as the labeled examples, but omit the Label
 line and replace it with an instruction to classify. For example:
 
-Title: {title}
-Description: {description}
+Title: Dr. Priya Nair on the Science of Sleep Deprivation
+Description: Dr. Priya Nair has spent fifteen years studying what happens to the brain when it doesn't sleep. In this episode, we talk through her landmark 2019 study on cumulative sleep debt, what the research says about weekend recovery sleep (spoiler: it doesn't work the way you think), and why she believes the eight-hour standard is more cultural myth than biological fact. She also shares what changed in her own sleep habits after spending a decade measuring everyone else's. If you've ever felt fine on five hours, this conversation will make you rethink that confidence.
 Label: ?
 
 Then add a line like: "Classify the episode above. Return your answer in
@@ -91,10 +91,23 @@ the format below:" followed by the output format you chose.
 **What output format should you request from the LLM?**
 
 ```
-[blank — you need to parse the response in classify_episode(). What format
-makes parsing reliable? Think about: a single label on its own line?
-A structured format like "Label: X / Reasoning: Y"? JSON?
-What are the tradeoffs?]
+Request a single JSON object on one line (not JSONL — this is one response per
+call, not a stream of records):
+
+{"label": "interview", "reasoning": "The description mentions a named guest and
+uses 'we talk through', signaling a host-guest conversation."}
+
+Tradeoffs:
+- JSON: most reliable to parse with json.loads(); fails clearly when malformed;
+  matches the dict the function must return. Downside: LLMs sometimes wrap output
+  in markdown fences (```json ... ```) — strip those before parsing.
+- "Label: X / Reasoning: Y": easy to write but fragile — if the model varies
+  punctuation or adds a newline, the split breaks.
+- Single label only: trivially parseable but loses reasoning, which the return
+  dict requires.
+
+JSON wins because it maps directly onto the {"label": ..., "reasoning": ...}
+return value and json.loads() handles validation for free.
 ```
 
 ---
@@ -102,9 +115,21 @@ What are the tradeoffs?]
 **Edge cases to handle in the prompt:**
 
 ```
-[blank — what if labeled_examples is empty? What if the description is very
-short? How does your prompt handle these?]
+1. labeled_examples is empty: add a guard before building the examples block.
+   If the list is empty, include a note in the prompt:
+   "No labeled examples are available. Use only the taxonomy definitions above."
+   This prevents the model from seeing a blank section and hallucinating a pattern.
+
+2. Description is very short (e.g., under ~20 words): include all available text
+   unchanged — do not truncate. Add no special instruction; the model should
+   classify on limited signal and return low-confidence reasoning. The caller
+   (classify_episode) handles the "unknown" fallback if the output is unparseable.
+
+3. Description contains special characters or newlines: no special handling needed
+   in the prompt itself — just ensure the description is inserted as-is and the
+   "---" delimiter between examples is on its own line so it remains unambiguous.
 ```
+
 
 ---
 
@@ -159,9 +184,17 @@ Extract the response text from:
 **Step 3 — Parse the response:**
 
 ```
-[blank — how do you extract the label and reasoning from the LLM's text output?
-What string operations or parsing logic do you need?
-This depends on the output format you chose in build_few_shot_prompt.]
+The output format is JSON, so parse with json.loads() — do not split strings.
+
+Steps:
+1. Strip leading/trailing whitespace from the raw response text.
+2. Strip markdown fences if present: remove a leading ```json or ``` and a
+   trailing ```. The model adds these even when not asked.
+3. Call json.loads() on the cleaned string.
+4. Extract parsed["label"] and parsed["reasoning"].
+
+If json.loads() raises a JSONDecodeError, catch it in Step 5 and return the
+fallback dict — do not try to salvage a malformed response with string ops.
 ```
 
 ---
@@ -169,20 +202,40 @@ This depends on the output format you chose in build_few_shot_prompt.]
 **Step 4 — Validate the label:**
 
 ```
-[blank — what do you do if the LLM returns a label that isn't in VALID_LABELS?
-What should label be set to?]
+After parsing, normalize and validate the label:
+1. Call .strip().lower() on parsed["label"].
+2. Check if the result is in VALID_LABELS.
+3. If yes, use it. If no, set label = "unknown".
+4. Log the raw response so the bad output is visible for debugging:
+     print(f"[classify_episode] unexpected label — raw response: {raw_text}")
+   This makes it possible to diagnose whether the model is drifting in format
+   or using a synonym (e.g. "narrated" instead of "narrative").
 ```
-
 ---
 
 **Step 5 — Handle errors gracefully:**
 
 ```
-[blank — what could go wrong? (Network error? Unparseable response?)
-What should the function return if something fails?
-Hint: the evaluation loop runs 20 calls — one bad response shouldn't crash everything.]
-```
+classify_episode() is called once per episode by an external evaluation loop —
+it has no control over other calls and cannot "skip to the next one." Its job
+is to never raise: always return a valid dict.
 
+Wrap the entire function body in a try/except Exception block:
+
+try:
+    # steps 1–4 here
+    return {"label": label, "reasoning": reasoning}
+except Exception as e:
+    print(f"[classify_episode] error: {e}")
+    return {"label": "unknown", "reasoning": f"error: {e}"}
+
+Specific failures this catches:
+- Network/API error from _client.chat.completions.create()
+- json.JSONDecodeError if the model returns malformed JSON
+- KeyError if the JSON is valid but missing "label" or "reasoning" keys
+
+The evaluation loop gets a valid dict every time and keeps running.
+```
 ---
 
 ### Return value structure
@@ -213,24 +266,37 @@ any labels you're unsure about. Annotation quality is part of the lab.
 **Test: what does the raw LLM response look like for one episode?**
 
 ```
-Episode tested: [title]
-Raw response text: [paste it here]
+Episode tested: The Aral Sea: A Disaster in Four Acts
+Raw response text (response.choices[0].message.content):
+{"label": "narrative", "reasoning": "The episode tells a story assembled from
+external sources, including historical events and possibly interviews, with a
+clear narrative arc about the decline of the Aral Sea."}
 ```
 
 **How did you parse the label out of the response?**
 
 ```
-[describe the string operations — strip, split, lower, etc.]
+1. raw_text.strip() — remove leading/trailing whitespace
+2. Check if cleaned text starts with ``` — if so, strip the opening fence
+   (including the optional "json" language tag) and the closing ```
+3. json.loads(cleaned) — parse into a dict
+4. parsed["label"].strip().lower() — normalize the label string
+5. Check normalized label against VALID_LABELS — set to "unknown" if not found
 ```
 
 **Did any episodes return `"unknown"`? If so, why?**
 
 ```
-[yes / no — if yes, what did the raw response look like?]
+No — every episode returned a valid label. The model consistently output clean
+JSON with a label from the four valid options.
 ```
 
 **One thing about the output format that surprised you:**
 
 ```
-[your answer here]
+The model returned clean JSON in the content field with no markdown fences —
+the fence-stripping code was not needed for this run. What was surprising is
+that the full response object (ChatCompletion) contains a large amount of
+metadata (token counts, timing, model fingerprint, etc.) beyond the content
+field, which is the only part classify_episode() actually uses.
 ```
