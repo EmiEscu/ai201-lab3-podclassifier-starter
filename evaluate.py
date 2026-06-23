@@ -51,15 +51,17 @@ def compute_accuracy(predictions: list[str], ground_truth: list[str]) -> float:
     """
     Compute overall classification accuracy.
 
-    TODO — Milestone 3:
-
     Accuracy = number of correct predictions / total predictions.
     A prediction is correct when it exactly matches the ground truth label.
-
-    Before writing code, complete specs/evaluation-spec.md.
     """
-    return 0.0
-
+    total = len(predictions)
+    if total == 0:
+        return 0.0
+    correct_predictions = 0
+    for i in range(total):
+        if predictions[i] == ground_truth[i]:
+            correct_predictions += 1
+    return correct_predictions / total
 
 def compute_per_class_accuracy(
     predictions: list[str], ground_truth: list[str]
@@ -83,7 +85,33 @@ def compute_per_class_accuracy(
 
     Before writing code, complete specs/evaluation-spec.md.
     """
-    return {label: {"correct": 0, "total": 0, "accuracy": 0.0} for label in VALID_LABELS}
+    # Step 1: Initialize the results dict for each label in VALID_LABELS
+    results = {
+        label: {"correct": 0, "total": 0, "accuracy": 0.0} 
+        for label in VALID_LABELS
+    }
+
+    # Step 2: Loop over each (predicted, truth) pair
+    # Using zip() is the cleanest way to iterate through both lists simultaneously by index
+    for pred, truth in zip(predictions, ground_truth):
+        if truth in results:
+            # Increment the total for the ground truth class
+            results[truth]["total"] += 1
+            
+            # If predicted matches truth, increment correct
+            if pred == truth:
+                results[truth]["correct"] += 1
+
+    # Step 3: Calculate accuracy for each class
+    for label, stats in results.items():
+        if stats["total"] > 0:
+            stats["accuracy"] = stats["correct"] / stats["total"]
+        else:
+            # Edge case: total == 0, keep accuracy at 0.0
+            stats["accuracy"] = 0.0
+
+    # Step 4: Return the finalized dictionary
+    return results
 
 
 def format_evaluation_report(eval_results: dict) -> str:
